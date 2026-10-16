@@ -410,6 +410,18 @@ fn home_tab(app: &mut RustGisApp, ui: &mut Ui) {
                 false,
             );
         });
+        let on = app.ui.right == Some(crate::RightPane::Directions);
+        big(
+            ui,
+            app,
+            "directions",
+            "Directions",
+            "Plan a route between places and follow it turn by turn (Valhalla, on OpenStreetMap data).",
+            "ui.pane.directions",
+            Value::Null,
+            on,
+            false,
+        );
     });
     bookmarks_group(app, ui);
     group(ui, "Add", |ui| {
