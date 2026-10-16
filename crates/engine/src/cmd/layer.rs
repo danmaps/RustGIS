@@ -101,7 +101,7 @@ pub fn commands() -> Vec<C> {
         }).params(r#"{"layer"?, "ramp": colour ramp name}"#)
         .when(need_layer),
         C::new("layer.legendOther", "Legend: All Other Values", "Style › Drawing", |s, p| {
-            let show = b(p, "show").ok_or("show must be true or false")?;
+            let show = p.get("show").and_then(Value::as_bool).ok_or("show must be true or false")?;
             with(s, p, |l| l.legend_other = show)
         })
         .params(r#"{"layer"?, "show": bool (list <all other values> in a Unique Values legend)}"#)
