@@ -64,8 +64,10 @@ pub struct State {
     /// The step highlighted on the map (clicked in the list, or under way in a drive).
     pub step: Option<usize>,
     pub sim: Option<Sim>,
-    /// A place being looked up by name, for which row.
-    lookup: Option<(usize, Geocoder, Answer)>,
+    /// A place being looked up by name: for which row, what it said then and how many places
+    /// there were (the answer lands only if that row still waits on that text), the server, and
+    /// its answer.
+    lookup: Option<(usize, String, usize, Geocoder, Answer)>,
     last_lookup: Option<Instant>,
     /// Places a name matched, for which row, to pick from.
     pub matches: Option<(usize, Vec<Place>)>,
@@ -272,13 +274,17 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
     let time = ctx.input(|i| i.time);
     let st = &mut app.ui.nav;
     // A place looked up by name.
-    if let Some((row, g, slot)) = &st.lookup {
+    if let Some((row, text, count, g, slot)) = &st.lookup {
         match take(slot) {
             Some(r) => {
                 let row = *row;
+                // The places changed meanwhile (edited, picked, removed, swapped): the answer is
+                // for a place no longer asked about.
+                let still = st.points.len() == *count && st.points.get(row).is_some_and(|p| p.at.is_none() && p.text.trim() == text);
                 let found = r.and_then(|b| g.parse(&b));
                 st.lookup = None;
                 match found {
+                    _ if !still => {}
                     Ok(p) if p.is_empty() => st.error = Some(tl!("No place matches that address.").to_string()),
                     Ok(p) if p.len() == 1 => {
                         if let (Some(pt), Some(first)) = (st.points.get_mut(row), p.first()) {
@@ -326,6 +332,8 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
             None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
         }
     }
+    // The interface's language for the instructions (the preference may be "auto").
+    let language = app.chosen_lang().code().to_string();
     let st = &mut app.ui.nav;
     // Ask again when the places or options changed.
     let key = st.key();
@@ -339,7 +347,7 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
                 avoid: st.avoid,
                 alternates: true,
                 imperial: st.imperial,
-                language: app.ui.language.clone(),
+                language,
             };
             match Router::new(None).and_then(|r| r.url(&req)) {
                 Ok(url) => st.pending = Some((fetch(&url), key)),
@@ -373,8 +381,11 @@ pub fn poll(app: &mut RustGisApp, ctx: &egui::Context) {
     }
 }
 
-/// How far along the route a drive is after `t` seconds: through the steps at their own pace.
+/// How far along the route a drive is after `t` seconds: through the steps at their own pace,
+/// scaled so the route's whole time ends at its end (the steps' times may not add up to it).
 pub fn distance_at(r: &Route, t: f64) -> f64 {
+    let steps: f64 = r.steps.iter().map(|s| s.duration_s).sum();
+    let t = if steps > 0.0 && r.duration_s > 0.0 { t * steps / r.duration_s } else { t };
     let mut elapsed = 0.0;
     for (i, s) in r.steps.iter().enumerate() {
         let next = r.steps.get(i + 1).map_or(r.distance_m.max(s.at_m), |n| n.at_m);
@@ -417,7 +428,7 @@ fn resolve(app: &mut RustGisApp, row: usize) {
     match Geocoder::new(None, None) {
         Ok(g) => {
             let slot = fetch(&g.url(&text, 5));
-            st.lookup = Some((row, g, slot));
+            st.lookup = Some((row, text, st.points.len(), g, slot));
             st.last_lookup = Some(Instant::now());
             st.matches = None;
             st.error = None;
@@ -807,20 +818,13 @@ pub fn maneuver_icon(kind: &str, modifier: &str) -> &'static str {
 /// Draws the routes, the places and the drive on the map. `to_screen` places a
 /// longitude/latitude (`None` behind the globe).
 pub fn paint(st: &State, p: &egui::Painter, rect: Rect, t: &Tokens, to_screen: impl Fn(Coord) -> Option<Pos2>) {
-    let line = |r: &Route, upto: Option<f64>, from: Option<f64>| -> Vec<Pos2> {
-        r.line
-            .iter()
-            .zip(&r.along)
-            .filter(|(_, a)| upto.is_none_or(|u| **a <= u) && from.is_none_or(|f| **a >= f))
-            .filter_map(|(c, _)| to_screen(*c))
-            .collect()
-    };
+    let line = |r: &Route, from: f64, to: f64| screen_line(r, from, to, &to_screen);
     let driving = st.sim.as_ref();
     // The other routes, grey, beneath.
     if driving.is_none() {
         for (i, r) in st.routes.iter().enumerate() {
             if i != st.chosen {
-                let pts = line(r, None, None);
+                let pts = line(r, f64::MIN, f64::MAX);
                 p.add(egui::Shape::line(pts.clone(), Stroke::new(9.0, Color32::from_rgba_unmultiplied(0x47, 0x55, 0x69, 128))));
                 p.add(egui::Shape::line(pts, Stroke::new(6.0, Color32::from_rgb(0x94, 0xA3, 0xB8))));
             }
@@ -828,12 +832,12 @@ pub fn paint(st: &State, p: &egui::Painter, rect: Rect, t: &Tokens, to_screen: i
     }
     if let Some(r) = st.route() {
         let done = driving.map(|s| distance_at(r, s.t));
-        let pts = line(r, None, done);
+        let pts = line(r, done.unwrap_or(f64::MIN), f64::MAX);
         p.add(egui::Shape::line(pts.clone(), Stroke::new(10.0, CASING)));
         p.add(egui::Shape::line(pts, Stroke::new(6.0, ROUTE)));
         // What's been driven, grey.
         if let Some(d) = done {
-            let mut pts = line(r, Some(d), None);
+            let mut pts = line(r, f64::MIN, d);
             if let Some(at) = r.at(d).and_then(|(c, _)| to_screen(c)) {
                 pts.push(at);
             }
@@ -899,16 +903,43 @@ fn banner(st: &State, r: &Route, d: f64, p: &egui::Painter, rect: Rect, t: &Toke
     p.galley(Pos2::new(x, b.min.y + 34.0), galley, Color32::WHITE);
 }
 
+/// The stretch of a route's line from `from` to `to` metres along, on screen, leaving out points
+/// within a pixel of the last one kept (a long route has many more points than pixels).
+fn screen_line(r: &Route, from: f64, to: f64, to_screen: &impl Fn(Coord) -> Option<Pos2>) -> Vec<Pos2> {
+    let a = r.along.partition_point(|&x| x < from);
+    let b = r.along.partition_point(|&x| x <= to).max(a);
+    let mut out: Vec<Pos2> = Vec::new();
+    let mut skipped = None;
+    for c in r.line.get(a..b).unwrap_or(&[]) {
+        let Some(sp) = to_screen(*c) else { continue };
+        if out.last().is_none_or(|l: &Pos2| (*l - sp).length_sq() >= 1.0) {
+            out.push(sp);
+            skipped = None;
+        } else {
+            skipped = Some(sp);
+        }
+    }
+    // The line still ends where it ends.
+    out.extend(skipped);
+    out
+}
+
 /// Whether a screen point is within a few pixels of a route's line.
 pub fn near(r: &Route, at: Pos2, to_screen: impl Fn(Coord) -> Option<Pos2>) -> bool {
-    let pts: Vec<Pos2> = r.line.iter().filter_map(|c| to_screen(*c)).collect();
-    pts.windows(2).any(|w| {
-        let (a, b) = (w[0], w[1]);
-        let ab = b - a;
-        let len2 = ab.length_sq();
-        let k = if len2 > 0.0 { ((at - a).dot(ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
-        (a + ab * k - at).length() <= 7.0
-    })
+    let mut prev: Option<Pos2> = None;
+    for c in &r.line {
+        let b = to_screen(*c);
+        if let (Some(a), Some(b)) = (prev, b) {
+            let ab = b - a;
+            let len2 = ab.length_sq();
+            let k = if len2 > 0.0 { ((at - a).dot(ab) / len2).clamp(0.0, 1.0) } else { 0.0 };
+            if (a + ab * k - at).length() <= 7.0 {
+                return true;
+            }
+        }
+        prev = b;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -955,5 +986,9 @@ mod tests {
         assert!((distance_at(&r, 5.0) - 50.0).abs() < 1e-9);
         assert!((distance_at(&r, 20.0) - 150.0).abs() < 1e-9);
         assert_eq!(distance_at(&r, 1e9), 200.0);
+        // The route's time is the drive's, whatever its steps' times add up to.
+        let slow = Route { duration_s: 60.0, ..r.clone() };
+        assert!((distance_at(&slow, 10.0) - 50.0).abs() < 1e-9);
+        assert_eq!(distance_at(&slow, 60.0), 200.0);
     }
 }

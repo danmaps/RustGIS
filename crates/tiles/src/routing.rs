@@ -251,12 +251,16 @@ fn route(r: &Value) -> Option<Route> {
             let text = |v: Option<&Value>, k: &str| -> String {
                 v.and_then(|v| v.get(k)).and_then(Value::as_str).unwrap_or("").chars().take(300).collect()
             };
-            let location = m
+            // A step without a place of its own (and no line yet to stand in) is left out.
+            let Some(location) = m
                 .and_then(|m| m.get("location"))
                 .and_then(Value::as_array)
                 .and_then(|c| Some(Coord::new(c.first()?.as_f64()?, c.get(1)?.as_f64()?)))
                 .filter(|c| valid(c.x, c.y))
-                .or_else(|| line.last().copied())?;
+                .or_else(|| line.last().copied())
+            else {
+                continue;
+            };
             let voice = s
                 .get("voiceInstructions")
                 .and_then(Value::as_array)
@@ -308,7 +312,7 @@ impl Route {
     pub fn at(&self, d: f64) -> Option<(Coord, f64)> {
         let (first, last) = (*self.line.first()?, *self.line.last()?);
         let end = self.along.last().copied().unwrap_or(0.0);
-        if d <= 0.0 || self.line.len() < 2 {
+        if d <= 0.0 || d.is_nan() || self.line.len() < 2 {
             return Some((first, bearing(first, *self.line.get(1).unwrap_or(&first))));
         }
         if d >= end {
@@ -495,6 +499,7 @@ mod tests {
         assert_eq!(a.step_at(a.steps[1].at_m + 1.0), 1);
         assert_eq!(a.step_at(1e9), 2);
         assert!(a.at(-5.0).is_some() && a.at(1e12).is_some());
+        assert_eq!(a.at(f64::NAN).map(|(c, _)| c), a.line.first().copied());
         // Errors, and hostile answers.
         assert_eq!(
             r.parse(br#"{"code":"NoSegment","message":"One of the supplied input coordinates could not snap to street segment."}"#)
@@ -504,6 +509,15 @@ mod tests {
         assert!(r.parse(b"<html>").is_err() && r.parse(b"{}").is_err());
         assert!(r.parse(br#"{"routes":[{"legs":[{"steps":[{"geometry":"!!!"}]}]}]}"#).is_err());
         assert!(r.parse(br#"{"routes":[{"legs":"x"},7,null]}"#).is_err());
+        // A step without a place is left out, not the route.
+        let odd = ANSWER
+            .replace(
+                r#""maneuver":{"instruction":"Drive south on Pariser Platz.","type":"depart","location":[13.378236,52.51634]}"#,
+                r#""maneuver":{"type":"depart","location":"x"}"#,
+            )
+            .replace(r#""geometry":"g~idcBwjpoXl@InGo@""#, r#""geometry":"""#);
+        let routes = r.parse(odd.as_bytes()).unwrap();
+        assert_eq!(routes[0].steps.len(), 2);
         assert!(explain("http status: 400").contains("no route"));
     }
 

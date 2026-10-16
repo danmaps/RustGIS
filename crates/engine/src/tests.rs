@@ -678,12 +678,23 @@ fn hostile_params_never_panic() {
                 | "boundaries.countries"
                 // Asks Source Cooperative for its featured products.
                 | "sourcecoop.products"
-                // Looks a place given by name up on the public geocoder.
-                | "map.route"
         ) {
             continue;
         }
         for p in &junk {
+            // Places given by name go to the public geocoder: with an answer given, the junk
+            // goes through reading it and the options, and nothing is fetched.
+            let routed;
+            let p = match p {
+                Value::Object(o) if id == "map.route" => {
+                    let mut o = o.clone();
+                    o.insert("answer".into(), json!(r#"{"code":"Ok","routes":[{"legs":[{"steps":[{"geometry":"_ibE_ibE_ibE_ibE","maneuver":{"type":"depart"}}]}]}]}"#));
+                    routed = Value::Object(o);
+                    &routed
+                }
+                _ if id == "map.route" => continue,
+                p => p,
+            };
             let mut s = world();
             let _ = s.run(id, p);
             let _ = s.run("info.project", &Value::Null);

@@ -16,8 +16,9 @@ pub fn commands() -> Vec<C> {
     )]
 }
 
-/// A place a command names: `[lon, lat]`, `{lon, lat}`, `"lat, lon"`, or a name to look up.
-fn place(s: &Session, v: Option<&Value>, what: &str) -> Result<Coord, String> {
+/// A place a command names: `[lon, lat]`, `{lon, lat}`, `"lat, lon"`, or a name to look up;
+/// `looked` counts the names looked up so far, spaced as the public geocoder asks.
+fn place(s: &Session, v: Option<&Value>, what: &str, looked: &mut usize) -> Result<Coord, String> {
     let bad = || format!("{what} is [lon, lat], 'lat, lon', or a place's name");
     let c = match v {
         Some(Value::Array(a)) => {
@@ -28,22 +29,30 @@ fn place(s: &Session, v: Option<&Value>, what: &str) -> Result<Coord, String> {
         }
         Some(Value::String(t)) if !t.trim().is_empty() => match routing::parse_latlon(t) {
             Some(c) => c,
-            None => return look_up(s, t),
+            None => {
+                *looked += 1;
+                return look_up(s, t, *looked > 1);
+            }
         },
         _ => return Err(bad()),
     };
     if c.is_finite() && c.x.abs() <= 180.0 && c.y.abs() <= 90.0 { Ok(c) } else { Err(bad()) }
 }
 
-/// The first place a name finds.
-fn look_up(_s: &Session, name: &str) -> Result<Coord, String> {
+/// The first place a name finds; `wait`s first when a name was just looked up (the public
+/// geocoder allows a request a second).
+fn look_up(_s: &Session, name: &str, wait: bool) -> Result<Coord, String> {
     #[cfg(target_arch = "wasm32")]
     {
+        let _ = wait;
         Err(format!("in the web app, give '{name}' as [lon, lat], or plan the route in the Directions pane"))
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let g = crate::render::rustgis_tiles::geocode::Geocoder::new(None, None)?;
+        if wait {
+            std::thread::sleep(std::time::Duration::from_millis(g.spacing_ms()));
+        }
         let found = crate::render::rustgis_tiles::geocode::search_blocking(&g, name, 1)?;
         found.first().map(|p| Coord::new(p.lon, p.lat)).ok_or_else(|| format!("no place found for '{name}'"))
     }
@@ -76,17 +85,18 @@ fn route(s: &mut Session, p: &Value) -> CmdResult {
     let routes = match ps(p, "answer") {
         Some(answer) => router.parse(answer.as_bytes())?,
         None => {
-            let mut points = vec![place(s, p.get("from"), "from")?];
+            let mut looked = 0;
+            let mut points = vec![place(s, p.get("from"), "from", &mut looked)?];
             if let Some(via) = p.get("via").filter(|v| !v.is_null()) {
                 let via = via.as_array().ok_or("via is a list of places")?;
                 if via.len() + 2 > routing::MAX_POINTS {
                     return Err(format!("a route passes through at most {} places", routing::MAX_POINTS));
                 }
                 for v in via {
-                    points.push(place(s, Some(v), "each stop")?);
+                    points.push(place(s, Some(v), "each stop", &mut looked)?);
                 }
             }
-            points.push(place(s, p.get("to"), "to")?);
+            points.push(place(s, p.get("to"), "to", &mut looked)?);
             let req = routing::Request {
                 points,
                 mode,
@@ -98,7 +108,10 @@ fn route(s: &mut Session, p: &Value) -> CmdResult {
             fetch(&router, &req)?
         }
     };
-    let i = p.get("route").and_then(Value::as_u64).unwrap_or(0) as usize;
+    let i = match p.get("route") {
+        None | Some(Value::Null) => 0,
+        Some(v) => v.as_u64().and_then(|n| usize::try_from(n).ok()).ok_or("route is a route's index in the answer")?,
+    };
     let r = routes.get(i).ok_or_else(|| format!("the answer has {} route(s)", routes.len()))?;
     let mut out = json!({
         "distanceKm": r.distance_m / 1000.0,
