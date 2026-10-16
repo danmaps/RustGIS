@@ -306,9 +306,10 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, t: &Token
     let mut x = r.min.x + 10.0;
     // Expand arrow.
     let raster_legend = l.raster.as_ref().map(|r| r.legend());
+    let vector_legend = if raster_legend.is_none() { l.legend_entries() } else { Vec::new() };
     let has_legend = match &raster_legend {
         Some(rl) => !rl.is_empty(),
-        None => !l.renderer.legend().is_empty(),
+        None => !vector_legend.is_empty(),
     };
     let ar = Rect::from_center_size(pos2(x + 6.0, r.center().y), vec2(14.0, 14.0));
     if has_legend {
@@ -502,7 +503,7 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, t: &Token
             ui.add_space(74.0);
             ui.label(egui::RichText::new(field).size(11.0).color(t.text_dim));
         });
-        for e in l.renderer.legend().iter().take(40) {
+        for e in vector_legend.iter().take(40) {
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
             let pr = Rect::from_center_size(pos2(r.min.x + 84.0, r.center().y), vec2(18.0, 14.0));
             patch(ui.painter(), pr, &e.symbol, l.geometry_type());
@@ -1737,6 +1738,10 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         Renderer::Unique { field, classes, ramp, .. } => {
             field_combo(app, ui, "Field", field, &all, "unique");
             ramp_picker(app, ui, ramp, t);
+            let mut show = l.legend_other;
+            if ui.checkbox(&mut show, tl!("Show <all other values> in legend")).changed() {
+                let _ = app.run("layer.legendOther", json!({"show": show}));
+            }
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(crate::i18n::fmt("{n} classes", &[("n", &classes.len().to_string())])).size(11.5).color(t.text_dim),

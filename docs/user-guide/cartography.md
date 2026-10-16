@@ -7,7 +7,10 @@
 Select a layer in Layers and open **Style › Symbology** (or the Symbology pane):
 
 - **Single Symbol**: one fill, outline and marker for every feature.
-- **Unique Values**: one colour per distinct value of a field.
+- **Unique Values**: one colour per distinct value of a field. The legend lists only the classes
+  that features passing the layer's definition query use; `<all other values>` appears only when
+  a shown feature falls outside the classes, and can be turned off with **Show <all other values>
+  in legend** (`layer.legendOther={"show":false}`).
 - **Graduated Colors**: 1 to 12 classes of a numeric field by natural breaks (Jenks), equal
   interval or quantile.
 - **Proportional Symbols**: point size grows with a numeric field.

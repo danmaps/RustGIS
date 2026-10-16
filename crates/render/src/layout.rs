@@ -465,9 +465,12 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, ppp: f64) {
         if y + line > r.y() + r.height() {
             break;
         }
-        let entries = l.renderer.legend();
+        let entries = l.legend_entries();
         let gt = l.geometry_type();
         if entries.is_empty() {
+            if !matches!(l.renderer, rustgis_map::Renderer::Single(_)) {
+                continue;
+            }
             swatch(pm, r.x(), y, sw, line, gt, &l.renderer.symbol_for(&l.dataset, 0), ppp);
             text::text_at(pm, &l.name, r.x() + sw + 6.0 * ppp, y + line / 2.0, 9.0 * 1.33 * ppp, dark, false, text::Align::Left, false);
             y += line;

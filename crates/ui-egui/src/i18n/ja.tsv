@@ -1880,3 +1880,4 @@ Zoom To World	世界にズーム
 ⌘K	⌘K
 Opening {url}…	{url} を開いています…
 {url}: downloaded after another project was opened, so it wasn't opened	{url}: 別のプロジェクトを開いた後にダウンロードされたため、開きませんでした
+Show <all other values> in legend	凡例に <all other values> を表示
