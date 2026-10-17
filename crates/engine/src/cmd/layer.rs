@@ -100,12 +100,6 @@ pub fn commands() -> Vec<C> {
             })
         }).params(r#"{"layer"?, "ramp": colour ramp name}"#)
         .when(need_layer),
-        C::new("layer.legendOther", "Legend: All Other Values", "Style › Drawing", |s, p| {
-            let show = p.get("show").and_then(Value::as_bool).ok_or("show must be true or false")?;
-            with(s, p, |l| l.legend_other = show)
-        })
-        .params(r#"{"layer"?, "show": bool (list <all other values> in a Unique Values legend)}"#)
-        .when(need_feature_layer),
         C::new("layer.color", "Symbol Color", "Style › Drawing", |s, p| {
             let c = Rgba::from_hex(s_req(p, "color")?).ok_or("color must be #RRGGBB or #RRGGBBAA")?;
             with(s, p, |l| {

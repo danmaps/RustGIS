@@ -805,7 +805,15 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
     let mut x = r.min.x + 10.0;
     // Expand arrow.
     let raster_legend = l.raster.as_ref().map(|r| r.legend());
-    let vector_legend = if raster_legend.is_none() { l.legend_entries() } else { Vec::new() };
+    // What the layer draws at this scale, as the layout legend lists it (#207); out of its scale
+    // range, what its definition query keeps, so the pane still shows its symbology.
+    let vector_legend = match &raster_legend {
+        Some(_) => Vec::new(),
+        None => l
+            .shown_legend(scale)
+            .or_else(|| (!l.in_scale_range(scale)).then(|| l.renderer.legend_for(&l.dataset, &l.visible_rows())))
+            .unwrap_or_default(),
+    };
     let has_legend = match &raster_legend {
         Some(rl) => !rl.is_empty(),
         None => !vector_legend.is_empty(),
@@ -2426,10 +2434,6 @@ fn symbology(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
         Renderer::Unique { field, classes, ramp, .. } => {
             field_combo(app, ui, "Field", field, &all, "unique");
             ramp_picker(app, ui, ramp, t);
-            let mut show = l.legend_other;
-            if ui.checkbox(&mut show, tl!("Show <all other values> in legend")).changed() {
-                let _ = app.run("layer.legendOther", json!({"show": show}));
-            }
             ui.add_space(6.0);
             ui.label(
                 egui::RichText::new(crate::i18n::fmt("{n} classes", &[("n", &classes.len().to_string())])).size(11.5).color(t.text_dim),

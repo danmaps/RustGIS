@@ -752,6 +752,20 @@ mod tests {
         let drawn = shown_legends(&map, 1e6);
         assert!(depth(&map, Some(&drawn), false) > 0, "<all other values> alone is listed");
         assert_eq!(depth(&map, Some(&drawn), true), 0, "and hidden, the layer is left out");
+        // So is one whose drawn features all fall in a fully transparent <all other values>,
+        // rather than drawn as a plain swatch of its first feature.
+        let set_other_alpha = |map: &mut Map, a: u8| {
+            if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts)
+                && let rustgis_map::Renderer::Unique { other, .. } = &mut l.renderer
+            {
+                other.fill = other.fill.with_alpha(a);
+                other.stroke = other.stroke.with_alpha(a);
+            }
+        };
+        set_other_alpha(&mut map, 0);
+        let drawn = shown_legends(&map, 1e6);
+        assert_eq!(depth(&map, Some(&drawn), false), 0, "the invisible fallback stands for nothing");
+        set_other_alpha(&mut map, 255);
         // A class that bears the fallback's name is a class: hiding the fallback keeps it.
         if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts)
             && let rustgis_map::Renderer::Unique { classes, .. } = &mut l.renderer

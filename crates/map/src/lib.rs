@@ -112,9 +112,6 @@ pub struct Layer {
     /// Whether the Layers pane shows the legend classes.
     #[serde(default = "yes")]
     pub expanded: bool,
-    /// Whether a Unique Values legend may list `<all other values>` (when features use it).
-    #[serde(default = "yes")]
-    pub legend_other: bool,
     #[serde(default = "yes")]
     pub selectable: bool,
     /// A graphics layer: each feature carries its own style (see [`graphics`]).
@@ -191,7 +188,6 @@ impl Layer {
             definition_query: None,
             selection: Vec::new(),
             expanded: true,
-            legend_other: true,
             selectable: true,
             graphics: false,
             blend: effects::Blend::Normal,
@@ -498,49 +494,6 @@ impl Layer {
             },
             None => vec![true; n],
         }
-    }
-
-    /// The legend for this layer. A Unique Values legend lists only the classes (and the
-    /// `<all other values>` fallback, when visible) that features passing the definition query use;
-    /// every other renderer, and a partial (streamed) layer, keeps the renderer's full class list.
-    pub fn legend_entries(&self) -> Vec<symbology::LegendEntry> {
-        let all = self.renderer.legend();
-        let Renderer::Unique { field, classes, other, .. } = &self.renderer else { return all };
-        let show_other = self.legend_other && (other.fill.a() > 0 || other.stroke.a() > 0);
-        if self.source.is_some() || self.dataset.windowed {
-            return if show_other { all } else { all.into_iter().filter(|e| !e.fallback).collect() };
-        }
-        let Some(fi) = self.dataset.field_index(field) else {
-            let uses_other = self
-                .visible_rows()
-                .into_iter()
-                .enumerate()
-                .any(|(row, keep)| keep && self.dataset.features.get(row).is_some_and(|f| f.geometry.is_some()));
-            return if show_other && uses_other {
-                vec![symbology::LegendEntry { label: symbology::OTHER_VALUES.into(), symbol: *other, fallback: true }]
-            } else {
-                Vec::new()
-            };
-        };
-        let class_names: std::collections::HashSet<&str> = classes.iter().map(|(name, _)| name.as_str()).collect();
-        let mut used = std::collections::HashSet::new();
-        let mut uses_other = false;
-        for (row, keep) in self.visible_rows().into_iter().enumerate() {
-            if !keep || self.dataset.features.get(row).is_none_or(|f| f.geometry.is_none()) {
-                continue;
-            }
-            let v = self.dataset.value(row, fi).to_string();
-            if class_names.contains(v.as_str()) {
-                used.insert(v);
-            } else {
-                uses_other = true;
-            }
-        }
-        let mut out: Vec<symbology::LegendEntry> = all.into_iter().filter(|e| !e.fallback && used.contains(&e.label)).collect();
-        if show_other && uses_other {
-            out.push(symbology::LegendEntry { label: symbology::OTHER_VALUES.into(), symbol: *other, fallback: true });
-        }
-        out
     }
 
     /// Extent in longitude/latitude.
@@ -1013,107 +966,6 @@ mod tests {
         d.push(Some(Geometry::Point(Coord::new(0.0, 0.0))), vec![Value::Int(1)]);
         d.push(Some(Geometry::Point(Coord::new(10.0, 10.0))), vec![Value::Int(2)]);
         d
-    }
-
-    fn legend_layer() -> Layer {
-        let mut d = Dataset::new("g", GeometryType::Point, vec![Field::new("region", FieldType::Text), Field::new("grp", FieldType::Text)]);
-        for (i, (r, g)) in [("south", "A"), ("north", "B"), ("south", "C"), ("south", "D"), ("north", "C")].iter().enumerate() {
-            d.push(Some(Geometry::Point(Coord::new(i as f64, 0.0))), vec![Value::Text((*r).into()), Value::Text((*g).into())]);
-        }
-        let base = Symbol::default_for(GeometryType::Point, 0);
-        let sym = |v: u8| base.with_fill(Rgba::rgb(v, 0, 0), GeometryType::Point);
-        let mut l = Layer::new(1, d);
-        l.renderer = Renderer::Unique {
-            field: "grp".into(),
-            classes: vec![("B".into(), sym(1)), ("A".into(), sym(2)), ("C".into(), sym(3))],
-            other: sym(9),
-            ramp: Ramp::default(),
-        };
-        l
-    }
-
-    fn labels(l: &Layer) -> Vec<String> {
-        l.legend_entries().into_iter().map(|e| e.label).collect()
-    }
-
-    #[test]
-    fn unique_legend_follows_definition_query() {
-        let mut l = legend_layer();
-        assert_eq!(labels(&l), ["B", "A", "C", "<all other values>"]);
-        l.definition_query = Some("region = 'south'".into());
-        assert_eq!(labels(&l), ["A", "C", "<all other values>"]);
-        assert_eq!(l.legend_entries()[0].symbol, l.renderer.legend()[1].symbol);
-        l.definition_query = Some("region = 'north'".into());
-        assert_eq!(labels(&l), ["B", "C"]);
-        l.definition_query = Some("region = 'nowhere'".into());
-        assert!(labels(&l).is_empty());
-        l.definition_query = None;
-        assert_eq!(labels(&l), ["B", "A", "C", "<all other values>"]);
-    }
-
-    #[test]
-    fn unique_legend_hides_transparent_fallback() {
-        let mut l = legend_layer();
-        if let Renderer::Unique { other, .. } = &mut l.renderer {
-            other.fill = other.fill.with_alpha(0);
-            other.stroke = other.stroke.with_alpha(0);
-        }
-        assert_eq!(labels(&l), ["B", "A", "C"]);
-        l.dataset.windowed = true;
-        assert_eq!(labels(&l), ["B", "A", "C"]);
-        l.dataset.windowed = false;
-        other_on(&mut l);
-        l.legend_other = false;
-        assert_eq!(labels(&l), ["B", "A", "C"]);
-        l.legend_other = true;
-        assert_eq!(labels(&l), ["B", "A", "C", "<all other values>"]);
-        l.legend_other = false;
-        l.dataset.windowed = true;
-        assert_eq!(labels(&l), ["B", "A", "C"]);
-    }
-
-    fn other_on(l: &mut Layer) {
-        if let Renderer::Unique { other, .. } = &mut l.renderer {
-            other.fill = other.fill.with_alpha(200);
-        }
-    }
-
-    #[test]
-    fn legend_is_conservative_for_partial_or_other_renderers() {
-        let mut l = legend_layer();
-        l.definition_query = Some("region = 'south'".into());
-        l.dataset.windowed = true;
-        assert_eq!(l.legend_entries().len(), l.renderer.legend().len());
-        let mut s = legend_layer();
-        s.renderer = Renderer::Single(Symbol::default_for(GeometryType::Point, 0));
-        assert!(s.legend_entries().is_empty());
-    }
-
-    #[test]
-    fn unique_legend_with_missing_field_shows_only_used_fallback() {
-        let mut l = legend_layer();
-        if let Renderer::Unique { field, .. } = &mut l.renderer {
-            *field = "missing".into();
-        }
-        assert_eq!(labels(&l), ["<all other values>"]);
-
-        l.definition_query = Some("region = 'nowhere'".into());
-        assert!(labels(&l).is_empty());
-        l.definition_query = None;
-        l.legend_other = false;
-        assert!(labels(&l).is_empty());
-
-        l.legend_other = true;
-        if let Renderer::Unique { other, .. } = &mut l.renderer {
-            other.fill = other.fill.with_alpha(0);
-            other.stroke = other.stroke.with_alpha(0);
-        }
-        assert!(labels(&l).is_empty());
-
-        for feature in &mut l.dataset.features {
-            feature.geometry = None;
-        }
-        assert!(labels(&l).is_empty());
     }
 
     /// A layer of one long line along the equator with `n` vertices.
