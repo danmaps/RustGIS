@@ -929,14 +929,28 @@ mod tests {
         let mut other = s(3);
         other.fill = other.fill.with_alpha(0);
         other.stroke = other.stroke.with_alpha(0);
-        let r = Renderer::Unique { field: "g".into(), classes: vec![("a".into(), s(0))], other, ramp: Ramp::Ember, class_labels: Default::default(), other_label: None };
+        let r = Renderer::Unique {
+            field: "g".into(),
+            classes: vec![("a".into(), s(0))],
+            other,
+            ramp: Ramp::Ember,
+            class_labels: Default::default(),
+            other_label: None,
+        };
         let labels = |r: &Renderer, rows: &[bool]| r.legend_for(&d, rows).into_iter().map(|e| e.label).collect::<Vec<_>>();
         assert_eq!(labels(&r, &[]), ["a"], "z falls in the invisible fallback");
         assert!(labels(&r, &[false, true]).is_empty(), "only the invisible fallback is used");
         // A visible stroke alone still stands for the features.
         let mut stroked = other;
         stroked.stroke = stroked.stroke.with_alpha(255);
-        let r2 = Renderer::Unique { field: "g".into(), classes: vec![("a".into(), s(0))], other: stroked, ramp: Ramp::Ember, class_labels: Default::default(), other_label: None };
+        let r2 = Renderer::Unique {
+            field: "g".into(),
+            classes: vec![("a".into(), s(0))],
+            other: stroked,
+            ramp: Ramp::Ember,
+            class_labels: Default::default(),
+            other_label: None,
+        };
         assert_eq!(labels(&r2, &[]), ["a", OTHER_VALUES]);
         // The full legend (the symbology editor's list) keeps it.
         assert_eq!(r.legend().len(), 2);
