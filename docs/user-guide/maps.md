@@ -8,13 +8,30 @@ projection, bookmarks and view settings. Maps open as tabs above the map view.
 Drag to pan and scroll to zoom; ++home++ (or **Full Extent**) shows all the data. **Map ›
 Navigate** has fixed zoom steps, **Previous** and **Next** extents, **Bookmarks** (the World Atlas
 has World, Europe, Africa, Americas and East Asia) and **Go To XY**, which pans to a longitude and
-latitude. Type a scale in the status bar to jump to it. More navigation tools are under [View
+latitude. The Bookmarks menu removes a bookmark with the button beside it, and exports or imports
+them as a `.rgisbookmarks` file. Imported bookmarks show the same place on a map in another
+projection; places that projection can't show are skipped. Type a scale in the status bar to jump
+to it. More navigation tools are under [View
 effects](#view-effects) below.
 
 **Find Place** (`map.findPlace`) looks up a place or an address by name with OpenStreetMap's
 [Nominatim](https://nominatim.org) (or a [Photon](https://photon.komoot.io) server, or a
 geocoder of your own given by its address) and zooms to the one picked. The search goes to that
 server over the network; see [Geocoding addresses](data.md#geocoding-addresses) for whole tables.
+
+The **search box** at the foot of the left pane searches the map as you type: a latitude and
+longitude (`40.7, -74.0`, `40.7N 74W` or `40°42'46"N 74°0'21"W`; latitude first unless the
+letters or a number past ±90 say otherwise), the map's layers and bookmarks by name, and the
+values in its layers' attribute tables (the best few per layer, by the feature's name where it has
+one). Places come from Nominatim when you press ++enter++ on **Search places**, since the public
+servers don't allow searching as you type. The arrow keys move through the list and ++enter++
+picks: a layer is zoomed to, a feature selected and zoomed to, and a coordinate or a place is
+marked with a pin until the box is cleared (✕ or ++esc++). `map.search` runs the same search from
+the command line or a script, and goes to a hit with `"go"`:
+
+```
+rustgis-cli run --sample --cmd 'map.search={"query":"Tokyo","go":true}'
+```
 
 ## Basemaps
 
@@ -44,10 +61,15 @@ Ocean, Atlas, Blank), which need no network, and web tile layers over them:
   hillshade and 3D extrusion are not drawn (extrusions draw flat). A label shows the lines of
   its text that the map's font can draw: a style's "Syria / سوريا" shows as "Syria".
 
-Add one with **Add Tile Layer…** at the bottom of the Basemap gallery, or install the
-[Basemaps plugin](https://plugins.rustgis.app/catalog/basemaps/) for a tab of public basemaps.
+The gallery's **Web Basemaps** need no API key: the OpenFreeMap vector maps (Liberty, Bright,
+Positron, Dark, Fiord) and USGS Imagery. Choosing one replaces the other web basemaps. For many
+more (OpenStreetMap, Esri, NASA and others), follow **Install the Basemaps plugin** under them,
+which opens the Plugin Manager at the
+[Basemaps plugin](https://plugins.rustgis.app/catalog/basemaps/); it adds a tab of public
+basemaps. Add any other with **Add Tile Layer…** at the bottom of the Basemap gallery.
 The gallery lists the map's tile layers: show or hide them, change their opacity and order, or
-remove them. Overlays (labels, roads) stay on top of the basemaps; choosing a built-in basemap
+remove them. The Layers pane lists them too, under the map's layers and above the basemap: tick
+one to show or hide it, and right-click it for its opacity, order and **Remove**. Overlays (labels, roads) stay on top of the basemaps; choosing a built-in basemap
 removes the web basemaps but keeps the overlays. Tile layers are saved with the project, and
 their credits are shown in the corner of the map and drawn on exports.
 
@@ -83,7 +105,9 @@ with the reason, rather than drawn in another projection:
 | North / South Polar Stereographic | Polar |
 | Europe Equal Area (ETRS89 LAEA), USA Contiguous Albers Equal Area | Regional, equal-area |
 
-Layers are projected on the fly. Each projection has an area of use: polar projections show
+Layers are projected on the fly. A feature that crosses the edge of a world projection (the
+meridian opposite its central one, such as 90°E in Equal Earth Americas) is cut there and drawn on
+both sides of the map. Each projection has an area of use: polar projections show
 their hemisphere poleward of 30°, regional ones their region, transverse Mercator (UTM) zones
 30° either side of their meridian, and data outside it isn't drawn. Switching keeps the centre
 and scale, and the choice is saved with the map (`map.projection` from the command line). A
@@ -103,12 +127,20 @@ circles, rasters are draped onto the sphere, and labels, selection, identify, me
 editing work as on the flat map. The scale stays the same when you switch, and the choice is
 saved with each map in the project (`map.projection` from the command line).
 
+While the globe turns or zooms, the map is drawn flat once and laid over the sphere by the
+graphics card, so it moves smoothly whatever the basemap; labels come back, and the map is
+drawn exactly, as soon as it stops.
+
+The globe hangs in dark space, in the light theme too, with stars around it and now and then a
+shooting star passing behind it. **View › Visual Effect › Stars** turns them off (exports show
+the stars but never the shooting stars).
+
 ## View effects
 
 ![Dark mode over Europe on the Midnight basemap, with the View tab open](https://assets.rustgis.app/images/dark.webp)
 
 The View tab adds effects drawn over the map: **Illumination** (day and night shading for a time,
-with twilight), **Weather** (haze, fog, rain, snow), **Visual Effect** (vignette, edges), **Camera
+with twilight), **Weather** (haze, fog, rain, snow), **Visual Effect** (vignette, edges, the stars around the globe), **Camera
 Effect** (tilt-shift blur, film grain) and **Postprocessing** (brightness, contrast, saturation,
 sepia). The **Color Vision** simulator shows the map as people with protanopia, deuteranopia,
 tritanopia or achromatopsia see it (on screen only; exports are untouched).
@@ -122,3 +154,10 @@ pad; **Camera** shows and sets the position and scale; the **Magnifier** shows t
 the pointer. On the Home tab, **First-Person** navigation walks with W A S D and flies up and down
 with Q and E. The interface follows the system's light or dark setting; **View › Display › Dark
 Mode** switches it by hand.
+
+**View › Display › GPU Rendering** (beta) draws the flat map on the GPU instead of the CPU:
+vector layers are tessellated once and re-projected per frame, so panning and zooming stay
+smooth on large datasets. It is off by default, and the setting is remembered across sessions
+(`ui.map.gpu` is the command; `RUSTGIS_GPU=1` forces it on for development). The globe,
+view effects and the colour-vision simulator always render on the CPU, and exports are
+unaffected — the choice only changes the on-screen flat map.

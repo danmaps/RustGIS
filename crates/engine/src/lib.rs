@@ -309,8 +309,10 @@ pub struct Session {
     pub keep_tool: bool,
     /// Copied features (Edit › Clipboard).
     pub clipboard: Option<cmd::clipboard::Clipboard>,
-    undo: Vec<(Project, &'static str)>,
-    redo: Vec<(Project, &'static str)>,
+    /// Each step keeps the layout that was open with its project (`active_layout` is the
+    /// session's, so a step that added or moved layouts opens the right one when undone).
+    undo: Vec<(Project, Option<usize>, &'static str)>,
+    redo: Vec<(Project, Option<usize>, &'static str)>,
     back: Vec<Camera>,
     forward: Vec<Camera>,
     /// Last camera recorded in the extent history.
@@ -323,6 +325,8 @@ pub struct Session {
     /// Asynchronous runs started and not yet complete: (id, job, resolved params, start time).
     #[cfg(feature = "geolibre")]
     pub(crate) started: Vec<(u64, rustgis_geolibre::Job, serde_json::Value, u64)>,
+    /// Plugin tool runs started and not yet complete (`gp::plugin_start`).
+    pub(crate) plugin_runs: Vec<cmd::gp::StartedRun>,
     /// Data downloads of this project under way (Add Data › From URL), by id.
     downloading: Vec<u64>,
     /// Downloads that landed, waiting for `layer.addDownload`.
@@ -356,7 +360,7 @@ fn strip_windows(p: &mut Project) {
     for l in p.maps.iter_mut().flat_map(|m| m.layers.iter_mut()) {
         if let Some(src) = &mut l.source {
             src.reset();
-            l.dataset.features = Vec::new();
+            l.dataset.features = Vec::new().into();
             l.selection.clear();
             l.touch_geometry();
         }
@@ -434,6 +438,7 @@ impl Session {
             next_pending: 0,
             #[cfg(feature = "geolibre")]
             started: Vec::new(),
+            plugin_runs: Vec::new(),
             downloading: Vec::new(),
             downloaded: Vec::new(),
             url_requests: Vec::new(),
@@ -574,6 +579,7 @@ impl Session {
     /// and restored if `f` fails or panics.
     pub(crate) fn guarded(&mut self, label: &'static str, mutates: bool, f: impl FnOnce(&mut Session) -> CmdResult) -> CmdResult {
         let snapshot = mutates.then(|| self.project.clone());
+        let open_layout = self.active_layout;
         // Edit counts roll back with the project when a command fails part way.
         let counts = mutates.then(|| self.edit_counts.clone());
         self.request_only = false;
@@ -598,7 +604,7 @@ impl Session {
             (Ok(_), Some(mut snap)) => {
                 // Undo keeps streamed layers' sources, not their windows: they read the view again.
                 strip_windows(&mut snap);
-                self.undo.push((snap, label));
+                self.undo.push((snap, open_layout, label));
                 if self.undo.len() > UNDO_LIMIT {
                     self.undo.remove(0);
                 }
@@ -606,7 +612,10 @@ impl Session {
                 self.dirty = true;
             }
             (Err(_), Some(snap)) => {
+                // The project as it was before the command, so the layout open then, whatever
+                // the command opened on the way (a task's steps).
                 self.project = snap;
+                self.active_layout = open_layout;
                 if let Some(c) = counts {
                     self.edit_counts = c;
                 }
@@ -651,10 +660,10 @@ impl Session {
         !self.redo.is_empty()
     }
     pub fn undo_label(&self) -> Option<&'static str> {
-        self.undo.last().map(|u| u.1)
+        self.undo.last().map(|u| u.2)
     }
     pub fn redo_label(&self) -> Option<&'static str> {
-        self.redo.last().map(|u| u.1)
+        self.redo.last().map(|u| u.2)
     }
 
     /// Forgets undo/redo and extent history and marks the project clean (after new/open, or a
@@ -676,6 +685,7 @@ impl Session {
         self.pending.clear();
         #[cfg(feature = "geolibre")]
         self.started.clear();
+        self.plugin_runs.clear();
         self.downloading.clear();
         self.downloaded.clear();
         self.url_requests.clear();
@@ -684,21 +694,37 @@ impl Session {
     }
 
     pub(crate) fn undo(&mut self) -> bool {
-        let Some((p, label)) = self.undo.pop() else { return false };
+        let Some((p, saved, label)) = self.undo.pop() else { return false };
+        let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
         self.project.keep_table_ids(&cur);
-        self.redo.push((cur, label));
+        self.reopen_layout(open, saved);
+        self.redo.push((cur, was, label));
         self.touch_all_geometry();
         true
     }
 
     pub(crate) fn redo(&mut self) -> bool {
-        let Some((p, label)) = self.redo.pop() else { return false };
+        let Some((p, saved, label)) = self.redo.pop() else { return false };
+        let (open, was) = (self.open_layout_name(), self.active_layout);
         let cur = std::mem::replace(&mut self.project, p);
         self.project.keep_table_ids(&cur);
-        self.undo.push((cur, label));
+        self.reopen_layout(open, saved);
+        self.undo.push((cur, was, label));
         self.touch_all_geometry();
         true
+    }
+
+    fn open_layout_name(&self) -> Option<String> {
+        self.active_layout.and_then(|i| self.project.layouts.get(i)).map(|l| l.name.clone())
+    }
+
+    /// After undo or redo swaps the project: the open layout stays open wherever it now is (so
+    /// redo doesn't move the view to a layout it brings back); one the swap took away gives way to
+    /// the layout open with the restored project (`saved`). With no layout open, none opens.
+    fn reopen_layout(&mut self, open: Option<String>, saved: Option<usize>) {
+        let ls = &self.project.layouts;
+        self.active_layout = open.and_then(|n| ls.iter().position(|l| l.name.eq_ignore_ascii_case(&n)).or(saved.filter(|i| *i < ls.len())));
     }
 
     fn touch_all_geometry(&mut self) {

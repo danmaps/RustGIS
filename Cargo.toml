@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/rustgis", "apps/rustgis-cli", "xtask"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.90"
@@ -38,6 +38,10 @@ geo = "0.33"
 shapefile = "0.9"
 csv = "1"
 tiny-skia = "0.12"
+# GPU map backend: vertex data shared with wgpu in ui-egui (derive only; unsafe stays forbidden).
+bytemuck = { version = "1", features = ["derive"] }
+# GPU map backend: polygon/line tessellation for the GPU scene (same major as SpatialOS's 1.x).
+lyon = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 ab_glyph = "0.2"
 # Rasters: GeoTIFF decoding/encoding, and coordinate systems by EPSG code (pure Rust, except the
@@ -63,6 +67,11 @@ bytes = "1"
 flatgeobuf = { version = "6", default-features = false }
 geozero = { version = "0.15", default-features = false, features = ["with-wkb"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+# PostgreSQL/PostGIS, in pure Rust: the client, and TLS through rustls (ring, as ureq has it).
+postgres = { version = "0.19", default-features = false }
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "1"
 # Excel and OpenDocument spreadsheets, in pure Rust (the browser too).
 calamine = { version = "0.36", default-features = false }
 laz = { version = "0.13", default-features = false }
@@ -73,10 +82,12 @@ ruzstd = { version = "0.9", default-features = false, features = ["std"] }
 
 # ui
 egui = "0.36"
+egui-wgpu = "0.36"
 egui_extras = { version = "0.36", default-features = false }
 eframe = { version = "0.36", default-features = false }
 egui_kittest = "0.36"
 rfd = "0.17"
+pollster = "0.4"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

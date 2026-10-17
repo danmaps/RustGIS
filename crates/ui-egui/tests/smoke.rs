@@ -15,6 +15,88 @@ fn harness() -> egui_kittest::Harness<'static, RustGisApp> {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn mcp_relay_early_start_wakes_queued_request_and_updates_ui() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::{Duration, Instant};
+
+    let mut app = RustGisApp::with_sample();
+    app.run("ui.mcpRelay", json!({"port": 0})).expect("start relay before first UI context");
+    let port = app.relay.as_ref().expect("relay started").port();
+    assert!(app.run("ui.mcpRelay", json!({"port": port})).is_ok());
+    assert!(app.run("ui.mcpRelay", json!({})).is_ok());
+    let different = if port == 1 { 2 } else { 1 };
+    let err = app.run("ui.mcpRelay", json!({"port": different})).expect_err("different port must be refused");
+    assert!(err.contains("stop it first"), "{err}");
+
+    let token = rustgis_ui_egui::rustgis_assistant::relay::read_token(port).expect("relay token");
+    let mut client = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).expect("connect to relay");
+    client.set_read_timeout(Some(Duration::from_millis(100))).expect("bounded reply poll");
+    writeln!(client, "{}", json!({"jsonrpc":"2.0","method":"rustgis/attach","params":{"access":false,"token":token}})).expect("attach");
+    writeln!(client, "{}", json!({"jsonrpc":"2.0","id":1,"method":"ping"})).expect("queue ping");
+    client.flush().expect("flush request");
+
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1400.0, 860.0)).with_max_steps(64).build_ui_state(
+        |ui, app: &mut RustGisApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    let mut input = BufReader::new(client.try_clone().expect("clone stream"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut reply = String::new();
+    loop {
+        h.step();
+        match input.read_line(&mut reply) {
+            Ok(0) => panic!("relay closed before replying"),
+            Ok(_) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                assert!(Instant::now() < deadline, "queued request was not executed");
+                reply.clear();
+            }
+            Err(e) => panic!("reading relay reply: {e}"),
+        }
+    }
+    let value: serde_json::Value = serde_json::from_str(&reply).expect("JSON-RPC reply");
+    assert_eq!(value["id"], 1);
+    assert_eq!(value["result"], json!({}));
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        h.step();
+        let attached = h.state().relay.as_ref().map(|r| r.attached_clients());
+        if attached == Some(1) && h.query_by_label("MCP relay · 1 attached").is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "attached state {attached:?} was not rendered as 1 attached");
+        std::thread::yield_now();
+    }
+    assert_eq!(h.state().relay.as_ref().map(|r| r.attached_clients()), Some(1));
+    assert!(h.query_by_label("MCP relay · 1 attached").is_some(), "authenticated-client indicator rendered");
+
+    client.shutdown(std::net::Shutdown::Both).expect("disconnect attached client");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        h.step();
+        let attached = h.state().relay.as_ref().map(|r| r.attached_clients());
+        if attached == Some(0) && h.query_by_label("MCP relay · 0 attached").is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "disconnected state {attached:?} was not rendered as 0 attached");
+        std::thread::yield_now();
+    }
+    assert_eq!(h.state().relay.as_ref().map(|r| r.attached_clients()), Some(0));
+    assert!(h.query_by_label("MCP relay · 0 attached").is_some(), "disconnect repaints the count");
+    h.get_by_label("MCP relay · 0 attached").click();
+    h.step();
+    assert!(h.state().relay.is_none(), "clicking indicator stops relay");
+    h.step();
+    assert!(h.query_by_label("MCP relay · 0 attached").is_none());
+}
 #[test]
 fn every_tab_pane_and_dialog_renders() {
     let mut h = harness();
@@ -737,4 +819,86 @@ fn save_project_dialog_needs_downloads() {
     assert!(h.state().dialogs.error.is_some());
     assert_eq!(h.state().session.project.name, "World Atlas");
     assert!(h.state().session.dirty);
+}
+
+#[test]
+fn map_context_menu_copies_the_clicked_coordinates() {
+    let mut h = harness();
+    for _ in 0..4 {
+        h.step();
+    }
+    // Right-click the middle of the map.
+    let at = egui::pos2(700.0, 500.0);
+    h.input_mut().events.push(egui::Event::PointerMoved(at));
+    for pressed in [true, false] {
+        h.input_mut().events.push(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: Default::default(),
+        });
+    }
+    for _ in 0..4 {
+        h.step();
+    }
+    // Moving onto the menu leaves the map: the item must stay.
+    h.get_by_label("Copy Coordinates").hover();
+    for _ in 0..4 {
+        h.step();
+    }
+    h.get_by_label("Copy Coordinates").click();
+    h.step();
+    let copied = h.output().platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t.contains(", ")));
+    assert!(copied, "nothing copied");
+}
+
+#[test]
+fn bookmarks_menu_removes_bookmarks() {
+    let mut h = harness();
+    h.state_mut().ui.tab = "Home".into();
+    for _ in 0..4 {
+        h.step();
+    }
+    let before = h.state().session.map().bookmarks.len();
+    h.get_by_label("Bookmarks").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    h.get_by_label("Remove Europe").click();
+    for _ in 0..4 {
+        h.step();
+    }
+    let map = h.state().session.map();
+    assert_eq!(map.bookmarks.len(), before - 1);
+    assert!(!map.bookmarks.iter().any(|b| b.name == "Europe"));
+}
+
+#[test]
+fn dialogs_can_be_moved() {
+    let mut h = harness();
+    // A tab without a New Bookmark button: only the dialog's title matches.
+    h.state_mut().ui.tab = "Help".into();
+    let _ = h.state_mut().run("ui.dialog", json!({"name": "bookmark"}));
+    for _ in 0..4 {
+        h.step();
+    }
+    let before = h.get_by_label("New Bookmark").rect();
+    // Drag the title bar.
+    let from = before.left_top() + egui::vec2(150.0, 12.0);
+    let to = from + egui::vec2(-200.0, 120.0);
+    let press =
+        |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+    h.input_mut().events.push(egui::Event::PointerMoved(from));
+    h.input_mut().events.push(press(from, true));
+    h.step();
+    for i in 1..=5 {
+        h.input_mut().events.push(egui::Event::PointerMoved(from + (to - from) * (i as f32 / 5.0)));
+        h.step();
+    }
+    h.input_mut().events.push(press(to, false));
+    for _ in 0..4 {
+        h.step();
+    }
+    let after = h.get_by_label("New Bookmark").rect();
+    assert!((after.left_top() - (before.left_top() + (to - from))).length() < 2.0, "{before:?} → {after:?}");
 }

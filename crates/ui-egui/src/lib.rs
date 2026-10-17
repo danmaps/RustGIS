@@ -13,13 +13,16 @@ mod assistantpane;
 mod backstage;
 mod catalogsui;
 mod chrome;
+mod comets;
 mod cswui;
 mod dialogs;
 mod docpanes;
 mod editpanes;
 mod geocodeui;
+mod globe_drape;
 pub mod icons;
 mod layoutview;
+mod mapgpu;
 mod mapview;
 mod opendataui;
 mod panes;
@@ -28,6 +31,7 @@ mod portalsui;
 mod reportpane;
 mod ribbon;
 mod s3ui;
+mod searchbox;
 mod sourcespane;
 mod sqlpane;
 mod stacui;
@@ -41,6 +45,7 @@ mod zarrui;
 use rustgis_engine::{Project, Session};
 use serde_json::{Value, json};
 
+pub use chrome::{DoubleClick, TitlebarMetrics};
 pub use rustgis_assistant;
 pub use rustgis_engine;
 
@@ -105,7 +110,7 @@ pub struct Services {
     pub fetch: Option<Box<dyn Fn(&str, Slot<Result<Vec<u8>, String>>)>>,
     /// Makes an HTTP request (the AI assistant's calls to its model) and puts the response, of any
     /// status, in the slot (the browser's fetch; the desktop sends it on a thread).
-    pub http: Option<Box<dyn Fn(rustgis_assistant::HttpRequest, Slot<Result<rustgis_assistant::HttpResponse, String>>)>>,
+    pub http: Option<Box<dyn Fn(rustgis_assistant::HttpRequest, Slot<Result<rustgis_assistant::HttpResponse, rustgis_assistant::Error>>)>>,
 }
 
 /// A new private folder for one print job: unique, created fresh (never an existing path) and,
@@ -200,6 +205,18 @@ pub(crate) fn fetch_into(url: &str) -> Slot<Result<Vec<u8>, String>> {
     slot
 }
 
+/// How the Layers pane lists the map's layers (#301).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LayersView {
+    /// In drawing order, top first; the only view that reorders layers.
+    #[default]
+    DrawingOrder,
+    /// Grouped under the file, web address or database each layer comes from.
+    DataSource,
+    /// Selectable and not selectable layers, with their selected feature counts.
+    Selection,
+}
+
 /// Panes on the left of the map.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeftPane {
@@ -272,8 +289,19 @@ pub struct UiState {
     pub hidden_tabs: Vec<String>,
     /// Extra Quick Access Toolbar commands.
     pub quick_access: Vec<String>,
+    /// The native title bar the header is drawn into; set by the desktop app on macOS.
+    pub titlebar: Option<TitlebarMetrics>,
     /// Saved pane arrangements: (name, left pane, right pane, tab).
     pub pane_sets: Vec<(String, Option<LeftPane>, Option<RightPane>, String)>,
+    /// The Layers pane's name filter (#300) and the map it was typed for: another map in view
+    /// starts unfiltered. Not saved.
+    pub layer_filter: String,
+    pub layer_filter_map: String,
+    /// The active layer the filter hid (so it stopped being active), selected again once the
+    /// filter shows it, unless another layer was picked meanwhile.
+    pub layer_filter_hid: Option<u32>,
+    /// How the Layers pane lists the layers (#301). Kept for the session, not saved.
+    pub layers_view: LayersView,
     /// The command an item picked in the browser opens with (web).
     pub pending_open: Option<&'static str>,
     /// The file the project was last saved or opened as (web), which Save downloads again.
@@ -313,6 +341,8 @@ pub struct UiState {
     pub opendata: opendataui::State,
     /// Find Place searches and Geocode Addresses runs under way.
     pub geocode: geocodeui::State,
+    /// The search box at the foot of the left pane.
+    pub search: searchbox::State,
     /// The Data Sources pane's boxes, and the sources' generation last kept in the preferences.
     pub sources: sourcespane::State,
     pub sources_saved: u64,
@@ -374,12 +404,18 @@ impl Default for UiState {
             catalogs: Default::default(),
             opendata: Default::default(),
             geocode: Default::default(),
+            search: Default::default(),
             sources: Default::default(),
             sources_saved: 0,
             zarr: Default::default(),
             hidden_tabs: Vec::new(),
             quick_access: Vec::new(),
+            titlebar: None,
             pane_sets: Vec::new(),
+            layer_filter: String::new(),
+            layer_filter_map: String::new(),
+            layer_filter_hid: None,
+            layers_view: LayersView::DrawingOrder,
         }
     }
 }
@@ -409,6 +445,18 @@ pub struct RustGisApp {
     pub quit_requested: bool,
     logo: Option<egui::TextureHandle>,
     pub services: Services,
+    /// The MCP relay for `rustgis-cli mcp --attach`: a loopback listener on the session this app
+    /// already has open, started by the `ui.mcpRelay` command and off until then.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub relay: Option<rustgis_assistant::relay::Relay>,
+    /// The frame's `egui::Context`, kept so `ui.mcpRelay` can hand the relay its wake callback:
+    /// a queued message asks for a repaint, or it waits for the user to move the mouse.
+    #[cfg(not(target_arch = "wasm32"))]
+    frame_ctx: Option<egui::Context>,
+    /// Set when `ui.mcpRelay` started the relay before the first frame, where there is no context
+    /// to give its wake callback yet: `logic` installs the wake as soon as a context exists.
+    #[cfg(not(target_arch = "wasm32"))]
+    relay_wake_pending: bool,
     /// Extra font faces installed with the interface fonts: (name, face, region). The current
     /// language's region comes right after the interface font, so its glyph shapes win; the others
     /// are last-resort fallbacks. Faces are shared, so reinstalling copies nothing.
@@ -427,6 +475,12 @@ pub struct RustGisApp {
 }
 
 impl RustGisApp {
+    /// egui's wgpu render state from the host (`frame.wgpu_render_state()`), feeding the GPU
+    /// map backend. Cheap to call every frame: the state is Arc-backed.
+    pub fn set_render_state(&mut self, rs: Option<egui_wgpu::RenderState>) {
+        self.map.set_render_state(rs);
+    }
+
     pub fn new(session: Session) -> Self {
         let mut s = session;
         if s.active_layer.is_none() {
@@ -454,6 +508,12 @@ impl RustGisApp {
             quit_requested: false,
             logo: None,
             services: Services::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            relay: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            frame_ctx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            relay_wake_pending: false,
             extra_fonts: Vec::new(),
             installed_region: None,
             fonts_dirty: false,
@@ -484,6 +544,9 @@ impl RustGisApp {
             self.ui.start_projection = p.code();
         }
         self.ui.start_extent = self.services.load_pref.as_ref().and_then(|load| load("start_extent")).and_then(|v| parse_extent(&v));
+        // The GPU map backend: RUSTGIS_GPU forces it on, else the saved preference.
+        self.map.gpu_enabled = std::env::var_os("RUSTGIS_GPU").is_some()
+            || self.services.load_pref.as_ref().and_then(|load| load("ui.map.gpu")).as_deref() == Some("1");
         if let Some(m) = self.services.load_pref.as_ref().and_then(|load| load("ribbon_minimized")) {
             self.ui.ribbon_minimized = m == "true";
         }
@@ -652,6 +715,7 @@ impl RustGisApp {
             (".cpt", "ramp.add"),
             (".rgistemplate", "project.fromTemplate"),
             (".rgistask", "task.import"),
+            (".rgisbookmarks", "bookmark.import"),
             (".rgisreport", "report.open"),
             (".rgisrpttemplate", "report.open"),
             (".rgispres", "presentation.import"),
@@ -879,6 +943,8 @@ impl RustGisApp {
         // names it again).
         if r.is_ok() && matches!(id, "project.new" | "project.sample" | "project.open" | "project.openText" | "project.fromTemplate") {
             self.ui.web_file = None;
+            // A deletion asked for in the old project never reaches a namesake in the new one.
+            self.map.deleting = None;
         }
         // Sources added, saved or made favourites are kept with the preferences.
         sourcespane::save(self);
@@ -1021,14 +1087,68 @@ impl RustGisApp {
                 self.ui.dark = p.get("dark").and_then(Value::as_bool).unwrap_or(!self.ui.dark);
                 self.ui.dark_follows_system = false;
             }
+            "ui.map.gpu" => {
+                self.map.gpu_enabled = p.get("on").and_then(Value::as_bool).unwrap_or(!self.map.gpu_enabled);
+                if let Some(save) = &self.services.save_pref {
+                    save("ui.map.gpu", if self.map.gpu_enabled { "1" } else { "0" });
+                }
+                self.map.invalidate();
+            }
             "ui.commandSearch" => self.ui.command_search = Some(String::new()),
             "ui.about" => self.ui.about = true,
             "ui.checkUpdate" => self.update.check(),
+            // The MCP relay for `rustgis-cli mcp --attach`: starts a loopback listener off until
+            // asked. Running the command again reports its address; the app owns its lifetime.
+            #[cfg(not(target_arch = "wasm32"))]
+            "ui.mcpRelay" => {
+                if p.get("stop").and_then(Value::as_bool).unwrap_or(false) {
+                    // Idempotent: stopping an already stopped relay is not an error.
+                    if let Some(relay) = self.relay.take() {
+                        relay.stop();
+                        self.session.notify(tl!("MCP relay stopped").to_string(), false);
+                    }
+                } else if let Some(relay) = &self.relay {
+                    // A named port is a request to listen there; silently ignoring it would hide
+                    // the mistake, so it is refused with the way out instead of rebinding.
+                    if let Some(asked) = p.get("port").and_then(Value::as_u64).and_then(|n| u16::try_from(n).ok())
+                        && asked != relay.port()
+                    {
+                        return Err(i18n::fmt(
+                            "MCP relay is already listening on 127.0.0.1:{port}; stop it first to use port {asked}",
+                            &[("port", &relay.port().to_string()), ("asked", &asked.to_string())],
+                        ));
+                    }
+                    let text = i18n::fmt("MCP relay listening on 127.0.0.1:{port}", &[("port", &relay.port().to_string())]);
+                    self.session.notify(text, false);
+                } else {
+                    let port = p
+                        .get("port")
+                        .and_then(Value::as_u64)
+                        .and_then(|n| u16::try_from(n).ok())
+                        .unwrap_or(rustgis_assistant::relay::DEFAULT_PORT);
+                    let relay = rustgis_assistant::relay::Relay::start(port)?;
+                    // The relay only queues; the frame runs the messages, so a queued message
+                    // asks for the frame that will run it. Before the first frame there is no
+                    // context yet; `logic` gives the relay its wake once one exists.
+                    if let Some(ctx) = &self.frame_ctx {
+                        let ctx = ctx.clone();
+                        relay.set_wake(Box::new(move || ctx.request_repaint()));
+                    } else {
+                        self.relay_wake_pending = true;
+                    }
+                    let text = i18n::fmt("MCP relay listening on 127.0.0.1:{port}", &[("port", &relay.port().to_string())]);
+                    self.session.notify(text, false);
+                    self.relay = Some(relay);
+                }
+            }
             "ui.plugins" => {
                 self.plugins.open = p.get("open").and_then(Value::as_bool).unwrap_or(!self.plugins.open);
                 if let Some(url) = p.get("registry").and_then(Value::as_str) {
                     self.plugins.url = url.to_string();
                     self.plugins.set_registry(None);
+                }
+                if let Some(filter) = p.get("filter").and_then(Value::as_str) {
+                    self.plugins.filter = filter.chars().take(200).collect();
                 }
                 if let Some(tab) = p.get("tab").and_then(Value::as_str) {
                     self.plugins.tab = match tab {
@@ -1454,6 +1574,7 @@ impl RustGisApp {
                     "importStyles" => ("style.import", &["rgislyr", "rgismap", "rgis", "rgisx"], "RustGIS layers, maps and projects"),
                     "template" => ("project.fromTemplate", &["rgistemplate"], "RustGIS project template"),
                     "task" => ("task.import", &["rgistask"], "RustGIS task"),
+                    "bookmarks" => ("bookmark.import", &["rgisbookmarks"], "RustGIS bookmarks"),
                     "report" => ("report.open", &["rgisreport", "rgisrpttemplate"], "RustGIS report or report template"),
                     "presentation" => ("presentation.import", &["rgispres"], "RustGIS presentation"),
                     "notebook" => ("notebook.open", &["rgisnb", "ipynb"], "RustGIS or Jupyter notebook"),
@@ -1609,18 +1730,21 @@ impl RustGisApp {
             "ui.linkCursors" => self.ws.link_cursors = p.get("on").and_then(Value::as_bool).unwrap_or(!self.ws.link_cursors),
             // A second map beside the active one (for linked views and cursors).
             "ui.splitView" => {
-                let others: Vec<usize> = (0..self.session.project.maps.len()).filter(|i| *i != self.session.project.active_map).collect();
-                self.ws.split = match (self.ws.split, p.get("map").and_then(Value::as_str)) {
-                    (_, Some(n)) => Some(
-                        self.session
-                            .project
-                            .maps
-                            .iter()
-                            .position(|m| m.name.eq_ignore_ascii_case(n))
-                            .ok_or_else(|| format!("no map '{n}'"))?,
+                // On while its map is there: a name left by a deleted or renamed map counts as off.
+                let on = mapview::split_map(self).is_some();
+                let (maps, active) = (&self.session.project.maps, self.session.project.active_map);
+                self.ws.split = match (on, p.get("map").and_then(Value::as_str)) {
+                    (_, Some(n)) => {
+                        Some(maps.iter().find(|m| m.name.eq_ignore_ascii_case(n)).ok_or_else(|| format!("no map '{n}'"))?.name.clone())
+                    }
+                    (true, None) => None,
+                    (false, None) => Some(
+                        maps.iter()
+                            .enumerate()
+                            .find(|(i, _)| *i != active)
+                            .map(|(_, m)| m.name.clone())
+                            .ok_or("add a second map first (Data › New Map)")?,
                     ),
-                    (Some(_), None) => None,
-                    (None, None) => Some(*others.first().ok_or("add a second map first (Data › New Map)")?),
                 };
             }
             "ui.paneSet" => {
@@ -1813,6 +1937,35 @@ impl RustGisApp {
                 if which == "graphicText" {
                     self.dialogs.a = p.get("lon").and_then(Value::as_f64).map(|v| v.to_string()).unwrap_or_default();
                     self.dialogs.b = p.get("lat").and_then(Value::as_f64).map(|v| v.to_string()).unwrap_or_default();
+                }
+                // Rename Map / Rename Layout remember which one (`target`, by name; default the
+                // one in view), so renaming another from the Browser leaves the view alone.
+                if matches!(which, "renameMap" | "renameLayout") {
+                    let target = p.get("target").and_then(Value::as_str);
+                    let pr = &self.session.project;
+                    let found = if which == "renameMap" {
+                        match target {
+                            Some(n) => pr.maps.iter().find(|m| m.name.eq_ignore_ascii_case(n)),
+                            None => pr.maps.get(pr.active_map),
+                        }
+                        .map(|m| m.name.clone())
+                    } else {
+                        match target {
+                            Some(n) => pr.layouts.iter().find(|l| l.name.eq_ignore_ascii_case(n)),
+                            None => self.session.active_layout.and_then(|i| pr.layouts.get(i)),
+                        }
+                        .map(|l| l.name.clone())
+                    };
+                    let Some(name) = found else {
+                        self.dialogs.open = None;
+                        // With no target, only Rename Layout can miss: no layout is open.
+                        return Err(match target {
+                            Some(n) => i18n::fmt("Nothing named {name} to rename", &[("name", n)]),
+                            None => tl!("open a layout first").to_string(),
+                        });
+                    };
+                    self.dialogs.a = name.clone();
+                    self.dialogs.text = name;
                 }
             }
             // Picks the image for a picture graphic whose corners were just dragged.
@@ -2038,11 +2191,28 @@ impl RustGisApp {
 
     /// Per-frame work that doesn't draw (theme, fonts, files that arrived).
     pub fn logic(&mut self, ctx: &egui::Context) {
+        // The MCP relay: what attached agents sent runs here, on this session, before the frame
+        // draws (Session lives on this thread; the listener only queues messages).
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.frame_ctx = Some(ctx.clone());
+            if let Some(relay) = &self.relay {
+                // A relay started before the first frame has no wake yet; now there is a context
+                // to ask for repaints with.
+                if self.relay_wake_pending {
+                    let ctx = ctx.clone();
+                    relay.set_wake(Box::new(move || ctx.request_repaint()));
+                    self.relay_wake_pending = false;
+                }
+                relay.poll(&mut self.session);
+            }
+        }
         // Fonts installed last frame are active now.
         self.fonts_pending = false;
         i18n::set_current(self.lang());
         rustgis_engine::plugins::set_language(self.lang().code());
         panes::poll_geolibre(self, ctx);
+        panes::poll_plugin_run(self, ctx);
         self.poll_downloads();
         // Addresses commands asked for where they couldn't download themselves (the browser):
         // fetched off the frame and added when they land, as Add Data › From URL does.
@@ -2177,6 +2347,7 @@ impl RustGisApp {
         i18n::set_current(self.lang());
         let t = theme::Tokens::get(&ctx);
         chrome::shortcuts(self, &ctx);
+        panes::follow_layer_filter(self);
         if self.ui.backstage {
             backstage::show(self, ui);
         } else {
@@ -2190,6 +2361,7 @@ impl RustGisApp {
             });
         }
         dialogs::show(self, &ctx);
+        mapview::confirm_delete(self, &ctx);
         pluginsui::show(self, &ctx);
         update::show(self, &ctx);
         chrome::command_search(self, &ctx);
