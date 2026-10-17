@@ -523,7 +523,8 @@ fn legend(pm: &mut Pixmap, r: Rect, map: &Map, title: &str, drawn: Option<&[(u32
         }
         let gt = l.geometry_type();
         if entries.is_empty() {
-            if !matches!(l.renderer, rustgis_map::Renderer::Single(_)) {
+            // A Unique Values layer that lists nothing draws nothing visible (#207).
+            if matches!(l.renderer, rustgis_map::Renderer::Unique { .. }) {
                 continue;
             }
             swatch(pm, r.x(), y, sw, line, gt, &l.renderer.symbol_for(&l.dataset, 0), ppp);
@@ -789,6 +790,20 @@ mod tests {
         }
         let drawn = shown_legends(&map, 1e6);
         assert!(depth(&map, Some(&drawn), true) > 0, "the class named like the fallback is still listed");
+        // A Graduated layer with no classes still shows its plain swatch, as before #207.
+        if let Some(l) = map.layers.iter_mut().find(|l| l.id == pts) {
+            l.renderer = rustgis_map::Renderer::Graduated {
+                field: "g".into(),
+                breaks: Vec::new(),
+                symbols: Vec::new(),
+                ramp: rustgis_map::Ramp::Ember,
+                method: rustgis_map::ClassMethod::NaturalBreaks,
+                min: 0.0,
+                class_labels: Default::default(),
+            };
+        }
+        map.layers.retain(|l| l.id == pts);
+        assert!(depth(&map, None, false) > 0, "the empty Graduated layer is listed");
     }
 
     #[test]

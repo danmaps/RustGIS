@@ -928,7 +928,8 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
     let pr = Rect::from_center_size(pos2(x + 9.0, r.center().y), vec2(18.0, 16.0));
     if l.is_raster() {
         icons::paint(ui.painter(), pr, "raster_layer", t.icon, t.accent);
-    } else if has_legend {
+    } else if has_legend || matches!(l.renderer, Renderer::Unique { .. }) {
+        // A Unique Values layer listing nothing shows its type, not a class it doesn't draw.
         let icon = match l.geometry_type() {
             GeometryType::Point => "point_layer",
             GeometryType::Polyline => "line_layer",

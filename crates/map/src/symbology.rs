@@ -376,7 +376,9 @@ impl Renderer {
             .collect();
         v.sort_by_cached_key(|e| e.label.to_lowercase());
         // A fully transparent fallback draws nothing, so it has nothing to stand for in a legend.
-        if other_used && (other.fill.a() > 0 || other.stroke.a() > 0) {
+        // Lines draw with their stroke only.
+        let visible = other.stroke.a() > 0 || (ds.geometry_type != GeometryType::Polyline && other.fill.a() > 0);
+        if other_used && visible {
             v.push(LegendEntry { label: other_label.clone().unwrap_or_else(|| OTHER_VALUES.into()), symbol: *other, fallback: true });
         }
         v
@@ -955,6 +957,21 @@ mod tests {
             other_label: None,
         };
         assert_eq!(labels(&r2, &[]), ["a", OTHER_VALUES]);
+        // A line's fill draws nothing: a fallback with only a fill is invisible on lines.
+        let mut lines = Dataset::new("l", GeometryType::Polyline, vec![Field::new("g", FieldType::Text)]);
+        lines.push(None, vec![Value::Text("z".into())]);
+        let mut filled = other;
+        filled.fill = filled.fill.with_alpha(255);
+        let r3 = Renderer::Unique {
+            field: "g".into(),
+            classes: vec![("a".into(), s(0))],
+            other: filled,
+            ramp: Ramp::Ember,
+            class_labels: Default::default(),
+            other_label: None,
+        };
+        assert!(r3.legend_for(&lines, &[]).is_empty());
+        assert_eq!(labels(&r3, &[]), ["a", OTHER_VALUES], "a polygon fill still shows");
         // The full legend (the symbology editor's list) keeps it.
         assert_eq!(r.legend().len(), 2);
     }
