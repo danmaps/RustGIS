@@ -1117,25 +1117,29 @@ fn layer_class_style_edits_one_class() {
     let mut s = world();
     s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "income_grp"})).unwrap();
     let renderer = |s: &Session| s.map().layer_by_name("Countries").unwrap().renderer.clone();
-    let first = |s: &Session| renderer(s).legend().into_iter().next().unwrap();
-    let value = first(&s).label;
+    // Legend rows are sorted by label (#218), so the edited class is found by its label.
+    let value = renderer(&s).legend().into_iter().next().unwrap().label;
+    let class = |s: &Session| {
+        let rows = renderer(s).legend();
+        rows.iter().find(|e| e.label == "Rich").or_else(|| rows.iter().find(|e| e.label == value)).cloned().unwrap()
+    };
     let r = s.run("layer.classStyle", &json!({"layer": "Countries", "value": value, "color": "#123456", "label": "Rich"})).unwrap();
     assert_eq!(r["label"], "Rich");
     assert!(r["color"].as_str().is_some_and(|c| c.starts_with("#123456")), "{r}");
-    assert_eq!(first(&s).label, "Rich");
+    assert_eq!(class(&s).label, "Rich");
     // One undo step, as every command is.
     s.run("edit.undo", &Value::Null).unwrap();
-    assert_eq!(first(&s).label, value);
+    assert_eq!(class(&s).label, value);
     s.run("edit.redo", &Value::Null).unwrap();
-    let edited = first(&s);
+    let edited = class(&s);
     assert_eq!(edited.label, "Rich");
     // Applying the symbology again on the same field keeps the edit; a new scheme recolours
     // every class and keeps the label.
     s.run("layer.symbology", &json!({"layer": "Countries", "type": "unique", "field": "income_grp"})).unwrap();
-    assert_eq!(first(&s), edited);
+    assert_eq!(class(&s), edited);
     s.run("layer.ramp", &json!({"layer": "Countries", "ramp": "Ember"})).unwrap();
-    assert_eq!(first(&s).label, "Rich");
-    assert_ne!(first(&s).symbol, edited.symbol);
+    assert_eq!(class(&s).label, "Rich");
+    assert_ne!(class(&s).symbol, edited.symbol);
     // The fallback class.
     s.run("layer.classStyle", &json!({"layer": "Countries", "other": true, "label": "Rest"})).unwrap();
     assert_eq!(renderer(&s).legend().last().map(|e| e.label.clone()).as_deref(), Some("Rest"));
@@ -6668,4 +6672,22 @@ fn ogc_refresh_reconciles_fields_and_preserves_compatible_settings() {
             assert_eq!(matches!(s.map().layer(layer).unwrap().renderer, rustgis_map::Renderer::Single(_)), renderer != "unique");
         }
     }
+}
+
+#[test]
+fn layer_color_honours_an_explicit_fill_alpha() {
+    let mut s = world();
+    let alpha = |s: &Session| s.map().layer_by_name("Countries").unwrap().renderer.base_symbol().fill.a();
+    for a in ["00", "40", "FF"] {
+        s.run("layer.color", &json!({"layer": "Countries", "color": format!("#336699{a}")})).unwrap();
+        assert_eq!(alpha(&s), u8::from_str_radix(a, 16).unwrap(), "alpha {a} from the colour picker is kept");
+    }
+    // A plain #RRGGBB keeps the layer's translucent fill.
+    s.run("layer.color", &json!({"layer": "Countries", "color": "#336699C8"})).unwrap();
+    s.run("layer.color", &json!({"layer": "Countries", "color": "#996633"})).unwrap();
+    assert_eq!(alpha(&s), 0xC8);
+    // It never makes the fill fainter than the floor `with_fill` gives a polygon.
+    s.run("layer.color", &json!({"layer": "Countries", "color": "#33669940"})).unwrap();
+    s.run("layer.color", &json!({"layer": "Countries", "color": "#996633"})).unwrap();
+    assert_eq!(alpha(&s), 150);
 }
