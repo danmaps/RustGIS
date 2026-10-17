@@ -75,6 +75,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
         RightPane::Shares => ("Shared Items", "ui.pane.shares"),
         RightPane::Sql => ("SQL", "ui.pane.sql"),
         RightPane::Directions => ("Directions", "ui.pane.directions"),
+        RightPane::Bookmarks => ("Bookmarks", "ui.pane.bookmarks"),
     };
     pane_header(app, ui, tl!(title), close, t);
     // The chat lays out its own scrolling, with the message box kept at the bottom.
@@ -108,6 +109,7 @@ fn right_pane(app: &mut RustGisApp, ui: &mut Ui, right: RightPane, t: &Tokens) {
             RightPane::Assistant | RightPane::Sql => {}
             RightPane::Shares => crate::docpanes::shares(app, ui, t),
             RightPane::Directions => crate::navui::show(app, ui, t),
+            RightPane::Bookmarks => crate::bookmarkpane::show(app, ui, t),
         });
     });
 }
@@ -334,18 +336,33 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             ui.label(egui::RichText::new(&map_name).font(semibold(12.5)));
         });
         let layers: Vec<Layer> = app.session.map().layers.clone();
+        let groups = app.session.map().service_groups.clone();
         let tiles: Vec<TileLayer> = app.session.map().tiles.clone();
         let scale = app.session.scale();
-        // How many layer and tile rows the view lists.
+        // How many layer, service group and tile entries the view lists.
         let listed = match view {
             LayersView::DrawingOrder => {
-                let blocks: Vec<(u32, Rect)> =
-                    layers.iter().filter(|l| shows(&l.name)).map(|l| (l.id, layer_row(app, ui, l, scale, reorder, t))).collect();
+                let mut shown = std::collections::HashSet::new();
+                let mut blocks = Vec::new();
+                for layer in layers.iter().filter(|l| shows(&l.name)) {
+                    if let Some(group) = groups.iter().find(|g| g.children.iter().any(|c| c.layer == layer.id)) {
+                        if shown.insert(group.id) {
+                            service_group_row(app, ui, group, &layers, scale, t);
+                        }
+                    } else {
+                        blocks.push((layer.id, layer_row(app, ui, layer, scale, reorder, t)));
+                    }
+                }
+                for group in &groups {
+                    if (!filtering || (group.children.is_empty() && shows(&group.name))) && shown.insert(group.id) {
+                        service_group_row(app, ui, group, &layers, scale, t);
+                    }
+                }
                 if reorder {
                     layer_drop(app, ui, &blocks, t);
                 }
                 // Web tile layers (services, tile addresses) draw over the basemap and under the layers.
-                let mut n = blocks.len();
+                let mut n = blocks.len() + shown.len();
                 for (i, tile) in tiles.iter().enumerate().filter(|(_, x)| shows(&x.name)) {
                     tile_row(app, ui, i, tiles.len(), reorder, tile, t);
                     n += 1;
@@ -355,6 +372,12 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
             LayersView::DataSource => source_groups(app, ui, &layers, &tiles, scale, &shows, t),
             LayersView::Selection => selection_groups(app, ui, &layers, &shows, t),
         };
+        if app.ui.service_import.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(tl!("Downloading…"));
+            });
+        }
         let tables: Vec<(u32, String)> =
             app.session.project.tables.iter().filter(|x| shows(&x.name)).map(|x| (x.id, x.name.clone())).collect();
         // A map with no layers says so below instead.
@@ -379,7 +402,7 @@ fn contents(app: &mut RustGisApp, ui: &mut Ui, t: &Tokens) {
                 );
             });
         }
-        if layers.is_empty() {
+        if layers.is_empty() && groups.is_empty() {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(egui::RichText::new(tl!("This map has no layers yet.")).color(t.text_dim));
@@ -676,6 +699,69 @@ fn selected_text(n: usize) -> String {
     crate::i18n::fmt("{n} selected", &[("n", &n.to_string())])
 }
 
+fn service_group_row(
+    app: &mut RustGisApp,
+    ui: &mut Ui,
+    group: &rustgis_engine::map::ServiceGroup,
+    layers: &[Layer],
+    scale: f64,
+    t: &Tokens,
+) {
+    let q = filter_query(&app.ui.layer_filter);
+    let filtering = !q.is_empty();
+    let mut children: Vec<&Layer> = layers.iter().filter(|l| group.children.iter().any(|c| c.layer == l.id)).collect();
+    children.sort_by_cached_key(|l| (l.name.to_lowercase(), l.id));
+    ui.push_id(("service_group", group.id), |ui| {
+        ui.horizontal(|ui| {
+            ui.add_space(8.0);
+            let (rect, arrow) = ui.allocate_exact_size(vec2(18.0, 26.0), Sense::click());
+            icons::paint(
+                ui.painter(),
+                rect.shrink2(vec2(2.0, 6.0)),
+                if group.expanded { "chevron_down" } else { "chevron_right" },
+                t.text_dim,
+                t.accent,
+            );
+            if arrow.clicked() {
+                let _ = app.run("service.group", json!({"group":group.id,"expanded":!group.expanded}));
+            }
+            let mut visible = !children.is_empty() && children.iter().all(|l| l.visible);
+            if ui.checkbox(&mut visible, "").changed() {
+                let _ = app.run("service.group", json!({"group":group.id,"visible":visible}));
+            }
+            let (rect, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+            icons::paint(ui.painter(), rect, "map", t.icon, t.accent);
+            let response = ui.add(egui::Label::new(egui::RichText::new(&group.name).font(semibold(12.5))).sense(Sense::click()));
+            if response.double_clicked() {
+                let _ = app.run("service.group", json!({"group":group.id,"expanded":!group.expanded}));
+            }
+            response.context_menu(|ui| {
+                if ui.add_enabled(app.ui.service_import.is_none(), egui::Button::new(tl!("Refresh"))).clicked() {
+                    let _ = app.run("ui.refreshService", json!({"group":group.id}));
+                    ui.close();
+                }
+                if ui.button(tl!("Rename…")).clicked() {
+                    let _ = app.run("ui.dialog", json!({"name":"renameServiceGroup"}));
+                    app.dialogs.layer = group.id.to_string();
+                    app.dialogs.text = group.name.clone();
+                    ui.close();
+                }
+                if ui.button(tl!("Remove")).clicked() {
+                    let _ = app.run("service.group", json!({"group":group.id,"remove":true}));
+                    ui.close();
+                }
+            });
+        });
+        if group.expanded || filtering {
+            ui.indent("children", |ui| {
+                for layer in children.iter().filter(|l| filter_shows(&q, &l.name)) {
+                    layer_row(app, ui, layer, scale, false, t);
+                }
+            });
+        }
+    });
+}
+
 /// The layer a row drag carries (egui's drag-and-drop payload).
 #[derive(Clone, Copy)]
 struct DraggedLayer(u32);
@@ -716,7 +802,10 @@ fn layer_drop(app: &mut RustGisApp, ui: &Ui, blocks: &[(u32, Rect)], t: &Tokens)
         ui.painter().line_segment([pos2(r.min.x + 8.0, y), pos2(r.max.x - 8.0, y)], Stroke::new(2.0, t.accent));
     }
     if ui.input(|i| i.pointer.any_released()) {
-        let _ = app.run("layer.move", json!({"layer": dragged.0, "to": to}));
+        // Nested/collapsed rows aren't positions in the map's flat rendering list.
+        if let Some(index) = blocks.get(to).and_then(|(id, _)| app.session.map().layer_index(*id)) {
+            let _ = app.run("layer.move", json!({"layer": dragged.0, "to": index}));
+        }
     }
 }
 
@@ -792,12 +881,13 @@ fn tile_row(app: &mut RustGisApp, ui: &mut Ui, i: usize, count: usize, reorder: 
 }
 
 /// A layer's row and, expanded, its legend; returns the rectangle of both. With `reorder` off
-/// (the list is filtered) the row can't be dragged.
+/// (the list is filtered or children are sorted by name) the row can't be dragged.
 fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: bool, t: &Tokens) -> Rect {
     let active = app.session.active_layer == Some(l.id);
     let row_h = 26.0;
     let sense = if reorder { Sense::click_and_drag() } else { Sense::click() };
     let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), sense);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &l.name));
     if reorder && resp.drag_started_by(egui::PointerButton::Primary) {
         egui::DragAndDrop::set_payload(ui.ctx(), DraggedLayer(l.id));
     }
@@ -945,7 +1035,8 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
             ui.label(egui::RichText::new(field).size(11.0).color(t.text_dim));
         });
         for e in vector_legend.iter().take(40) {
-            let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+            let (r, response) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), Sense::hover());
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &e.label));
             let pr = Rect::from_center_size(pos2(r.min.x + 84.0, r.center().y), vec2(18.0, 14.0));
             patch(ui.painter(), pr, &e.symbol, l.geometry_type());
             ui.painter().text(pos2(r.min.x + 100.0, r.center().y), Align2::LEFT_CENTER, &e.label, regular(11.5), t.text);
@@ -958,6 +1049,11 @@ fn layer_row(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, scale: f64, reorder: 
 /// `reorder` (the drawing order view, unfiltered).
 fn layer_menu(app: &mut RustGisApp, ui: &mut Ui, l: &Layer, reorder: bool) {
     let _ = app.session.run("layer.select", &json!({"layer": l.id}));
+    let service_child = app.session.map().service_groups.iter().any(|g| g.children.iter().any(|c| c.layer == l.id));
+    if service_child && ui.add_enabled(app.ui.service_import.is_none(), egui::Button::new(tl!("Refresh"))).clicked() {
+        let _ = app.run("ui.refreshService", json!({"layer":l.id}));
+        ui.close();
+    }
     let items: &[(&str, &str)] = if l.is_raster() {
         &[("Zoom To Layer", "layer.zoomTo"), ("Symbology", "ui.pane.symbology")]
     } else {
